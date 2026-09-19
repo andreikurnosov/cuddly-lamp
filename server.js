@@ -46,7 +46,7 @@ async function load(){
   status.className="status";
   status.textContent="Загрузка…";
   try{
-    const r=await fetch("/api/episodes?limit=70",{cache:"no-store"});
+    const r=await fetch("https://radio-t.com/site-api/last/70?categories=podcast",{cache:"no-store"});
     if(!r.ok)throw Error("HTTP "+r.status);
     let data=await r.json();
     if(!Array.isArray(data))data=data.posts||data.items||data.podcasts||[];
@@ -65,7 +65,7 @@ function render(items){
   }).join("");
   [...list.querySelectorAll("[data-i]")].forEach(function(b){b.onclick=function(){start(items[+b.dataset.i])}});
 }
-function audioUrl(e){return e.audio_url||e.audio||e.enclosure?.url||e.file||""}
+function audioUrl(e){const u=e.audio_url||e.audio||e.enclosure?.url||e.file||"";return String(u).replace(/^http:/,"https:")}
 function start(e){
   const url=audioUrl(e);
   if(!url){status.className="status error";status.textContent="У выпуска не найден аудиофайл";return}
