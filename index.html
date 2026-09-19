@@ -24,10 +24,72 @@
 <script>
 const $=s=>document.querySelector(s), list=$("#list"), status=$("#status"), audio=$("#audio"), player=$("#player"), pt=$("#pt"), play=$("#play"), seek=$("#seek");
 let current=null, allItems=[], offlineOnly=false, currentObjectUrl=null;
-const MEDIA_CACHE="radio-t-media-v1";
-let offlineIds=new Set(JSON.parse(localStorage.rtOfflineEpisodes||"[]"));
-function persistOfflineIds(){localStorage.rtOfflineEpisodes=JSON.stringify([...offlineIds])}
-function setOffline(e,value){const k=id(e);value?offlineIds.add(k):offlineIds.delete(k);persistOfflineIds()}
+const DB_NAME="radio-t-offline";
+const DB_VERSION=1;
+const STORE="episodes";
+let offlineIds=new Set();
+
+function openOfflineDb(){
+  return new Promise((resolve,reject)=>{
+    const req=indexedDB.open(DB_NAME,DB_VERSION);
+    req.onupgradeneeded=()=>{
+      const db=req.result;
+      if(!db.objectStoreNames.contains(STORE)){
+        db.createObjectStore(STORE,{keyPath:"id"});
+      }
+    };
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function dbPutEpisode(e,blob){
+  const db=await openOfflineDb();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(STORE,"readwrite");
+    tx.objectStore(STORE).put({
+      id:id(e),
+      title:e.title||"Радио-Т",
+      audioUrl:audioUrl(e),
+      blob,
+      type:blob.type||"audio/mpeg",
+      size:blob.size,
+      savedAt:Date.now()
+    });
+    tx.oncomplete=()=>{db.close();resolve()};
+    tx.onerror=()=>{const err=tx.error;db.close();reject(err)};
+    tx.onabort=()=>{const err=tx.error;db.close();reject(err)};
+  });
+}
+async function dbGetEpisode(key){
+  const db=await openOfflineDb();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(STORE,"readonly");
+    const req=tx.objectStore(STORE).get(key);
+    req.onsuccess=()=>resolve(req.result||null);
+    req.onerror=()=>reject(req.error);
+    tx.oncomplete=()=>db.close();
+  });
+}
+async function dbDeleteEpisode(key){
+  const db=await openOfflineDb();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(STORE,"readwrite");
+    tx.objectStore(STORE).delete(key);
+    tx.oncomplete=()=>{db.close();resolve()};
+    tx.onerror=()=>{const err=tx.error;db.close();reject(err)};
+  });
+}
+async function loadOfflineIds(){
+  const db=await openOfflineDb();
+  const keys=await new Promise((resolve,reject)=>{
+    const tx=db.transaction(STORE,"readonly");
+    const req=tx.objectStore(STORE).getAllKeys();
+    req.onsuccess=()=>resolve(req.result||[]);
+    req.onerror=()=>reject(req.error);
+    tx.oncomplete=()=>db.close();
+  });
+  offlineIds=new Set(keys.map(String));
+}
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
 function id(e){return String(e.num||e.id||e.url||e.title)}
 function progress(){try{return JSON.parse(localStorage.rtProgress||"{}")}catch{return {}}}
@@ -78,39 +140,49 @@ async function load(){
 }
 async function downloadEpisode(e,button){
   const url=audioUrl(e);
-  if(!url||!("caches" in window)){status.className="status error";status.textContent="Офлайн-хранилище недоступно в этом браузере";return}
+  if(!url||!("indexedDB" in window)){
+    status.className="status error";
+    status.textContent="IndexedDB недоступен в этом браузере";
+    return;
+  }
   const old=button.textContent;
   button.disabled=true;
   button.textContent="Скачивание…";
   try{
-    const cache=await caches.open(MEDIA_CACHE);
-    let response;
-    try{
-      response=await fetch(url,{mode:"cors",cache:"no-store"});
-      if(!response.ok)throw Error("HTTP "+response.status);
-    }catch(corsError){
-      response=await fetch(url,{mode:"no-cors",cache:"no-store"});
+    const response=await fetch(url,{mode:"cors",cache:"no-store"});
+    if(!response.ok)throw Error("HTTP "+response.status);
+    const blob=await response.blob();
+    if(!blob.size)throw Error("Пустой аудиофайл");
+    await dbPutEpisode(e,blob);
+    offlineIds.add(id(e));
+    if(navigator.storage&&navigator.storage.persist){
+      navigator.storage.persist().catch(()=>{});
     }
-    await cache.put(url,response.clone());
-    setOffline(e,true);
-    if(navigator.storage&&navigator.storage.persist)navigator.storage.persist().catch(()=>{});
+    const mb=(blob.size/1024/1024).toFixed(1);
     status.className="status";
-    status.textContent=(e.title||"Выпуск")+" сохранён для офлайн-прослушивания";
+    status.textContent=(e.title||"Выпуск")+" сохранён офлайн ("+mb+" МБ)";
     filterItems();
   }catch(err){
     console.error(err);
     button.disabled=false;
     button.textContent=old;
     status.className="status error";
-    status.textContent=err&&err.name==="QuotaExceededError"?"Не хватает места для выпуска":"Не удалось сохранить выпуск офлайн";
+    if(err&&err.name==="QuotaExceededError"){
+      status.textContent="Не хватает места в хранилище приложения";
+    }else if(String(err&&err.message||"").includes("Failed to fetch")){
+      status.textContent="CDN не разрешил загрузку в IndexedDB (CORS)";
+    }else{
+      status.textContent="Не удалось сохранить выпуск офлайн";
+    }
   }
 }
 async function removeOffline(e){
   try{
-    const cache=await caches.open(MEDIA_CACHE);
-    await cache.delete(audioUrl(e));
-  }catch{}
-  setOffline(e,false);
+    await dbDeleteEpisode(id(e));
+    offlineIds.delete(id(e));
+  }catch(err){
+    console.error(err);
+  }
   filterItems();
   status.className="status";
   status.textContent="Офлайн-копия удалена";
@@ -140,19 +212,21 @@ async function start(e){
   pt.textContent=e.title||"Радио-Т";
   if(currentObjectUrl){URL.revokeObjectURL(currentObjectUrl);currentObjectUrl=null}
   let source=url;
-  if(offlineIds.has(id(e))&&"caches" in window){
+  if(offlineIds.has(id(e))&&"indexedDB" in window){
     try{
-      const cached=await (await caches.open(MEDIA_CACHE)).match(url);
-      if(cached){
-        try{
-          const blob=await cached.clone().blob();
-          if(blob.size>0){currentObjectUrl=URL.createObjectURL(blob);source=currentObjectUrl}
-        }catch{}
+      const saved=await dbGetEpisode(id(e));
+      if(saved&&saved.blob&&saved.blob.size>0){
+        currentObjectUrl=URL.createObjectURL(saved.blob);
+        source=currentObjectUrl;
+        status.className="status";
+        status.textContent="Воспроизведение офлайн";
       }else{
-        setOffline(e,false);
+        offlineIds.delete(id(e));
         filterItems();
       }
-    }catch{}
+    }catch(err){
+      console.error(err);
+    }
   }
   audio.src=source;
   audio.onloadedmetadata=()=>{const p=progress()[id(e)];if(p&&p.position>10&&p.position<audio.duration-10)audio.currentTime=p.position};
@@ -185,6 +259,9 @@ if("serviceWorker" in navigator){
 if(navigator.storage&&navigator.storage.persist)navigator.storage.persist().catch(()=>{});
 addEventListener("online",()=>{status.className="status";if(!status.textContent)status.textContent=""});
 addEventListener("offline",()=>{status.className="status";status.textContent="Офлайн-режим"});
-load();
+(async()=>{
+  try{await loadOfflineIds()}catch(err){console.warn("IndexedDB init failed",err)}
+  await load();
+})();
 </script>
 </body></html>
