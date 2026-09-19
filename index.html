@@ -35,27 +35,36 @@ function filterItems(){
 async function load(){
   status.className="status";
   status.textContent="Загрузка выпусков…";
+
+  try{
+    const local=await fetch("/episodes-fallback.json?t="+Date.now(),{cache:"no-store"});
+    if(local.ok){
+      allItems=await local.json();
+      filterItems();
+      status.textContent="";
+    }
+  }catch(e){ console.warn("fallback failed",e); }
+
   try{
     const controller=new AbortController();
-    const timer=setTimeout(()=>controller.abort(),15000);
+    const timer=setTimeout(()=>controller.abort(),6000);
     const r=await fetch("/api/episodes?limit=70&t="+Date.now(),{cache:"no-store",signal:controller.signal});
     clearTimeout(timer);
-    if(!r.ok){
-      let detail="";
-      try{detail=(await r.json()).detail||""}catch{}
-      throw Error("HTTP "+r.status+" "+detail);
-    }
+    if(!r.ok)throw Error("HTTP "+r.status);
     const payload=await r.json();
     const data=Array.isArray(payload)?payload:(payload.items||[]);
-    allItems=data;
-    if(!data.length)throw Error("Пустой ответ API");
-    filterItems();
-    status.textContent="";
-    console.info("Radio-T source:",payload.source||"unknown");
+    if(data.length){
+      allItems=data;
+      filterItems();
+      status.textContent="";
+      console.info("Radio-T source:",payload.source||"unknown");
+    }
   }catch(e){
-    console.error(e);
-    status.className="status error";
-    status.textContent="Не удалось загрузить выпуски: "+(e.name==="AbortError"?"таймаут":e.message);
+    console.warn("live API unavailable, using fallback",e);
+    if(!allItems.length){
+      status.className="status error";
+      status.textContent="Не удалось загрузить выпуски";
+    }
   }
 }
 function render(items){
